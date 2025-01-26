@@ -1,0 +1,30 @@
+{
+  "name": "wall-scaling-archivist",
+  "version": "0.0.1",
+  "description": "Discord bot which replies to paywalled article links with an archive link (requesting one as needed)",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TheCrimsonKing92/wall-scaling-archivist.git"
+  },
+  "keywords": [
+    "discord",
+    "bot",
+    "archive"
+  ],
+  "author": "TheCrimsonKing92",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/TheCrimsonKing92/wall-scaling-archivist/issues"
+  },
+  "homepage": "https://github.com/TheCrimsonKing92/wall-scaling-archivist#readme",
+  "dependencies": {
+    "bufferutil": "^4.0.9",
+    "discord.js": "^14.17.3",
+    "dotenv": "^16.4.7",
+    "undici": "^7.3.0"
+  }
+}
