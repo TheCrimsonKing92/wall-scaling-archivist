@@ -1,47 +1,42 @@
 const { Client, Events, GatewayIntentBits, PresenceUpdateStatus } = require('discord.js');
 const { Guilds, GuildMessages, MessageContent } = GatewayIntentBits;
 const dotenv = require('dotenv');
+const linkifyit = require('linkify-it');
 const { request } = require('undici');
 
 dotenv.config();
-
 const { DEBUG, TOKEN, TRACE } = process.env;
 const debug = "true" === DEBUG || false;
 const trace = "true" === TRACE || false;
-
-// Can be modified later, but usually .org and .gov don't have paywalls
-const TLDS = [ ".com", ".gov", ".net" ];
 
 const client = new Client({
 	intents: [ Guilds, GuildMessages, MessageContent ]
 });
 
-// Later this dumb string stuff should become regex
-const beginsWithUrlParts = (word) => {
-	return word.startsWith("http://") ||
-	       word.startsWith("https://") ||
-	       word.startsWith("www.");
-};
+const linkify = linkifyit();
+linkify.tlds(require('tlds')).add('ftp:', null);
+
+const protocols = ['https://', 'http://'];
 
 const buildReply = (pages) => {
 	const urls = Object.keys(pages);
+	const total = urls.length;
 
-	if (urls.length === 0) {
+	if (total === 0) {
 		return "Get bent, skinbag (there's no URL in this message)";
 	}
 
-	if (urls.length === 1) {
-		const theUrl = urls[0];
-		if (pages[theUrl].error) {
+	if (total === 1) {
+		const first = urls[0];
+		if (countSuccesses(pages, urls) === 0) {
 			return "I couldn't get the content for that page :(";
 		}
 
-		return `I was able to get the content for the ${theUrl} page!`;
+		return `I was able to get the content for the ${first} page!`;
 	}
 
-	const successful = urls.filter(url => !pages[url].error).length;
-	const failed = urls.filter(url => pages[url].error).length;
-	const total = urls.length;
+	const successful = countSuccesses(pages, urls);
+	const failed = total - successful;
 
 	if (successful > 0 && failed === 0) {
 		return `I was able to get the content for all ${successful} pages!`;
@@ -52,18 +47,57 @@ const buildReply = (pages) => {
 	}
 };
 
-const extractUrls = (message) => {
+const countSuccesses = (pages, urls) => urls.filter(url => !pages[url].error).length;
+
+const extractUrls = async (message) => {
 	const { content } = message;
-	if (!includesUrl(content)) {
+
+	if (!linkify.test(content)) {
 		return [];
 	}
 
-	return content.split(" ").filter(isUrl);
+	const matches = linkify.match(content);
+	const cleaned = [];
+
+	const protocolsMatch = (match) => {
+		const { raw, url } = match;
+
+		return protocols.some(protocol => raw.startsWith(protocol) && url.startsWith(protocol));
+	};
+
+	// Would be nice to do this with map, but this was easier to express
+	for (const match of matches) {
+		if (protocolsMatch(match)) {
+			cleaned.push(match.url);
+		} else {
+			cleaned.push(await getDetectedProtocolUrl(match.raw));
+		}
+	}
+
+	return cleaned.filter(url => url !== null);
 };
 
 const findPaywall = data => {
 	// Will likely need different paywall detection methods
 	return false;
+};
+
+const getDetectedProtocolUrl = async (baseUrl) => {
+	for (const protocol of protocols) {
+		const url = `${protocol}${baseUrl}`;
+
+		try {
+			const { statusCode } = await request(url, { method: 'HEAD' });
+
+			if (statusCode >= 200 && statusCode < 400) {
+				return url;
+			}
+		} catch (err) {
+			// Ignored
+		}
+	}
+
+	return null;
 };
 
 const getPage = async (url) => {
@@ -105,55 +139,13 @@ const getPages = async (urls) => {
 	return pages;
 };
 
-const includesTLD = (word) => {
-	const includesAny = (word, inclusions) => {
-		return inclusions.some(inclusion => word.includes(inclusion));
-	};
-
-	return includesAny(word, TLDS);
-};
-
-const includesUrl = (content) => {
-	return content.split(" ").some(isUrl);
-};
-
 const isBotMessage = (message) => {
 	return message.author.id === client.user.id;
-};
-
-const isMarkdownUrl = (word) => {
-	if (trace) {
-		console.log(`Is ${word} a Markdown URL?`);
-		console.log(`Starts with left bracket? ${word.startsWith("[")}`);
-		console.log(`Ends with right paren? ${word.endsWith(")")}`);
-		console.log(`Includes TLD? ${includesTLD(word)}`);
-	}
-	return word.startsWith("[") && word.endsWith(")") && includesTLD(word);
 };
 
 const isPaywalled = async (url) => {
 	getPage(url).then(findPaywall)
 		    .catch(reason => { console.error(reason); throw reason; });
-};
-
-const isPlainUrl = (word) => {
-	if (trace) {
-		console.log(`Is ${word} a plain URL?`);
-		console.log(`beginsWithUrlParts? ${beginsWithUrlParts(word)}`);
-		console.log(`includesTLD? ${includesTLD(word)}`);
-	}
-
-	return  beginsWithUrlParts(word) && includesTLD(word);
-};
-
-const isUrl = (word) => {
-	if (debug) {
-		console.log(`Is ${word} a URL?`);
-		console.log(`isPlainUrl? ${isPlainUrl(word)}`);
-		console.log(`isMarkdownUrl? ${isMarkdownUrl(word)}`);
-	}
-
-	return isPlainUrl(word) || isMarkdownUrl(word);
 };
 
 const logMessageProperties = (message) => {
@@ -181,7 +173,8 @@ client.on(Events.MessageCreate, async message => {
 		return;
 	}
 
-	const urls = extractUrls(message);
+	const urls = await extractUrls(message);
+	console.log("Extracted urls", urls);
 	const pages = await getPages(urls);
 	message.reply(buildReply(pages));
 });
