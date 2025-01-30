@@ -2,42 +2,59 @@ const { Client, Events, GatewayIntentBits, PresenceUpdateStatus } = require('dis
 const { Guilds, GuildMessages, MessageContent } = GatewayIntentBits;
 const dotenv = require('dotenv');
 const linkifyit = require('linkify-it');
-const { request } = require('undici');
+const { fetch, request } = require('undici');
+const { parseHTML } = require('linkedom');
 
 dotenv.config();
-const { DEBUG, TOKEN, TRACE } = process.env;
-const debug = "true" === DEBUG || false;
-const trace = "true" === TRACE || false;
+const DEBUG = "true" === process.env.DEBUG;
+const TRACE = "true" === process.env.TRACE;
 
-const client = new Client({
+const ARCHIVE_URL = "https://archive.is/";
+const CLIENT = new Client({
 	intents: [ Guilds, GuildMessages, MessageContent ]
 });
+const NO_URL_REPLY = "Get bent, skinbag (there's no URL in this message)";
+//'.paywall, .meteredContent, .subscriber-only, .subscription-required') !== null) {
+
+/*
+	paywall-overlay found on Washington Post
+	paywall, meteredContent, subscriber-only, subscription-required are generic
+*/
+const PAYWALL_CLASSES = '.paywall-overlay, .paywall, .meteredContent, .metered-content, .subscriber-only, .subscription-required';
+const PAYWALL_KEYWORDS = [
+	'subscribe', 'subscription', 'paywall', 'unlock access', 'unlocks access',
+	'continue reading'
+];
+const PROTOCOLS = [ 'https://', 'http://' ];
+const { TOKEN } = process.env;
 
 const linkify = linkifyit();
 linkify.tlds(require('tlds')).add('ftp:', null);
 
-const protocols = ['https://', 'http://'];
-
-const buildReply = (pages) => {
+const buildReply = (pages, archives) => {
 	const urls = Object.keys(pages);
 	const total = urls.length;
-
-	if (total === 0) {
-		return "Get bent, skinbag (there's no URL in this message)";
-	}
+	const successful = countPages(pages, urls);
 
 	if (total === 1) {
-		const first = urls[0];
-		if (countSuccesses(pages, urls) === 0) {
-			return "I couldn't get the content for that page :(";
-		}
-
-		return `I was able to get the content for the ${first} page!`;
+		return buildSingleUrlReply(pages, urls, successful);
 	}
 
-	const successful = countSuccesses(pages, urls);
 	const failed = total - successful;
 
+	return buildMultiUrlReply(pages, urls, successful, failed);
+};
+
+const buildSingleUrlReply = (pages, urls, successful) => {
+	if (successful === 0) {
+		return "I couldn't get the content for that page :(";
+	}
+
+	const url = urls[0];
+	return `I was able to get the content for the ${url} page!`;
+};
+
+const buildMultiUrlReply = (pages, urls, successful, failed) => {
 	if (successful > 0 && failed === 0) {
 		return `I was able to get the content for all ${successful} pages!`;
 	} else if (successful > 0 && failed > 0) {
@@ -47,7 +64,9 @@ const buildReply = (pages) => {
 	}
 };
 
-const countSuccesses = (pages, urls) => urls.filter(url => !pages[url].error).length;
+const countArchives = (archives, urls) => urls.filter(url => archives[url].result).length;
+
+const countPages = (pages, urls) => urls.filter(url => !pages[url].error).length;
 
 const extractUrls = async (message) => {
 	const { content } = message;
@@ -58,12 +77,6 @@ const extractUrls = async (message) => {
 
 	const matches = linkify.match(content);
 	const cleaned = [];
-
-	const protocolsMatch = (match) => {
-		const { raw, url } = match;
-
-		return protocols.some(protocol => raw.startsWith(protocol) && url.startsWith(protocol));
-	};
 
 	// Would be nice to do this with map, but this was easier to express
 	for (const match of matches) {
@@ -77,13 +90,22 @@ const extractUrls = async (message) => {
 	return cleaned.filter(url => url !== null);
 };
 
-const findPaywall = data => {
+const findPaywall = (data) => {
+	const { document } parseHTML(data);
 	// Will likely need different paywall detection methods
+	if (document.querySelector(PAYWALL_CLASSES) !== null) {
+		return true;
+	}
+
+	if (PAYWALL_KEYWORDS.some(keyword => data.includes(keyword) || data.toLowerCase().includes(keyword.toLowerCase()))) {
+		return true;
+	}
+
 	return false;
 };
 
 const getDetectedProtocolUrl = async (baseUrl) => {
-	for (const protocol of protocols) {
+	for (const protocol of PROTOCOLS) {
 		const url = `${protocol}${baseUrl}`;
 
 		try {
@@ -130,7 +152,6 @@ const getPages = async (urls) => {
 		const page = {
 			error: data === null,
 			url,
-			page: data,
 			paywalled: findPaywall(data)
 		};
 		pages[url] = page;
@@ -139,13 +160,56 @@ const getPages = async (urls) => {
 	return pages;
 };
 
-const isBotMessage = (message) => {
-	return message.author.id === client.user.id;
+const getArchive = async (url) => {
+	const NO_RESULT = {
+		result: false,
+		archive: null
+	};
+	const searchUrl = `${ARCHIVE_URL}${url}`;
+	const response = await fetch(searchUrl);
+
+	const html = await response.text();
+	const { document } = parseHTML(html);
+
+	// Container element for links
+	const textBlocks = document.queryselectorAll('div.TEXT-BLOCK');
+
+	if (!textBlocks || textBlocks.length === 0) {
+		return NO_RESULT;
+	}
+
+	const textBlock = textBlocks[0];
+	const archives = textBlock.querySelectorAll('a');
+
+	if (!archives || archives.length === 0) {
+		return NO_RESULT;
+	}
+
+	const latestArchive = archives.find(archive => archive.href);
+
+	if (!latestArchive) {
+		return NO_RESULT;
+	}
+
+	return {
+		result: true,
+		archive: latestArchive.href
+	};
 };
 
-const isPaywalled = async (url) => {
-	getPage(url).then(findPaywall)
-		    .catch(reason => { console.error(reason); throw reason; });
+const getArchives = async (urls) => {
+	const archives = {};
+
+	for (const url of urls) {
+		const archive = await getArchive(url);
+		archives[url] = archive;
+	}
+
+	return archives;
+};
+
+const isBotMessage = (message) => {
+	return message.author.id === CLIENT.user.id;
 };
 
 const logMessageProperties = (message) => {
@@ -154,12 +218,18 @@ const logMessageProperties = (message) => {
 	}
 };
 
-client.once(Events.ClientReady, readyClient => {
+const protocolsMatch = (match) => {
+	const { raw, url } = match;
+
+	return PROTOCOLS.some(protocol => raw.startsWith(protocol) && url.startsWith(protocol));
+};
+
+CLIENT.once(Events.ClientReady, readyClient => {
 	console.log(`Ready! Logged in as ${readyClient.user.tag}`);
 	readyClient.user.setStatus(PresenceUpdateStatus.Online);
 });
 
-client.on(Events.MessageCreate, async message => {
+CLIENT.on(Events.MessageCreate, async message => {
 	if (trace) {
 		console.log('Received message create event');
 		logMessageProperties(message);
@@ -174,9 +244,29 @@ client.on(Events.MessageCreate, async message => {
 	}
 
 	const urls = await extractUrls(message);
+
+	if (urls.length === 0) {
+		if (debug) {
+			console.log("No URLs found in message content");
+		}
+		message.reply(NO_URL_REPLY);
+		return;
+	}
+
 	console.log("Extracted urls", urls);
-	const pages = await getPages(urls);
-	message.reply(buildReply(pages));
+	const [ pages, archives ] = await processUrls(urls);
+	message.reply(buildReply(pages, archives));
 });
 
-client.login(TOKEN);
+const processUrls = async (urls) => {
+	// We get page contents for urls, to see if they're paywalled
+	const pages = await getPages(urls);
+	// When we've confirmed paywall detection is working, add filter condition
+	// A la page => !page.error && page.paywalled
+	const archiveResults = await getArchives(pages.filter(page => !page.error));
+	const archives = archiveResults.filter(archive => archive.result);
+
+	return [ pages, archives ];
+};
+
+CLIENT.login(TOKEN);

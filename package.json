@@ -25,6 +25,7 @@
     "bufferutil": "^4.0.9",
     "discord.js": "^14.17.3",
     "dotenv": "^16.4.7",
+    "linkedom": "^0.18.7",
     "linkify-it": "^5.0.0",
     "tlds": "^1.255.0",
     "undici": "^7.3.0"
