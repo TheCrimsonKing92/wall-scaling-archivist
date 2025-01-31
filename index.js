@@ -4,6 +4,7 @@ const dotenv = require('dotenv');
 const linkifyit = require('linkify-it');
 const { fetch, request } = require('undici');
 const { parseHTML } = require('linkedom');
+const puppeteer = require('puppeteer');
 
 dotenv.config();
 const DEBUG = "true" === process.env.DEBUG;
@@ -14,16 +15,54 @@ const CLIENT = new Client({
 	intents: [ Guilds, GuildMessages, MessageContent ]
 });
 const NO_URL_REPLY = "Get bent, skinbag (there's no URL in this message)";
-//'.paywall, .meteredContent, .subscriber-only, .subscription-required') !== null) {
-
-/*
-	paywall-overlay found on Washington Post
-	paywall, meteredContent, subscriber-only, subscription-required are generic
-*/
-const PAYWALL_CLASSES = '.paywall-overlay, .paywall, .meteredContent, .metered-content, .subscriber-only, .subscription-required';
+const PAYWALL_ATTRIBUTES = {
+	"data-campaign": {
+		contains: [
+			"PAYWALL",
+			"REGIWALL",
+			"REGWALL",
+			"OFFER"
+		]
+	},
+	"data-test-id": {
+		contains: [
+			"REGWALL"
+		]
+	},
+	"allow": {
+		contains: [
+			"payment"
+		]
+	},
+	"class": {
+		contains: [
+			"PAYWALL",
+			"OFFER",
+			"-pay-",
+			"metered-content", "meteredContent",
+			"subscriber", "subscriber-only", "subscription"
+		]
+	},
+	"href": {
+		contains: [
+			"subscriptions/checkout",
+			"subscription/checkout"
+		]
+	},
+	"id": {
+		contains: [
+			"PAYWALL",
+			"REGWALL",
+			"OFFER",
+			"barrier-page",
+			"barrier",
+			"fortress"
+		]
+	}
+};
 const PAYWALL_KEYWORDS = [
-	'subscribe', 'subscription', 'paywall', 'unlock access', 'unlocks access',
-	'continue reading'
+	'Already a subscriber?', 'subscribe', 'subscription', 'paywall', 'unlock access', 'unlocks access',
+	'continue reading', 'Continue with a free trial', "Register"
 ];
 const PROTOCOLS = [ 'https://', 'http://' ];
 const { TOKEN } = process.env;
@@ -90,18 +129,27 @@ const extractUrls = async (message) => {
 	return cleaned.filter(url => url !== null);
 };
 
-const findPaywall = (data) => {
-	const { document } parseHTML(data);
-	// Will likely need different paywall detection methods
-	if (document.querySelector(PAYWALL_CLASSES) !== null) {
+const findPaywall = async (url) => {
+	console.log('Launching browser');
+	const browser = await puppeteer.launch();
+	console.log('Generating new page');
+	const page = await browser.newPage();
+	console.log("Setting user agent on page");
+	await page.setUserAgent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36");
+	console.log(`Going to url ${url}`);
+	await page.goto(url, { timeout: 120000, waitUntil: 'networkidle2' });
+
+	console.log('Scanning for paywall attribute');
+	if (await hasPaywallAttributePage(page)) {
 		return true;
 	}
 
-	if (PAYWALL_KEYWORDS.some(keyword => data.includes(keyword) || data.toLowerCase().includes(keyword.toLowerCase()))) {
-		return true;
-	}
+	// Should likely switch to page.evaluate(() => document.body.textContent and go from there
+	console.log('Getting page text content');
+	const textContent = await page.content();
 
-	return false;
+	console.log('Scanning for paywall keywords');
+	return hasPaywallKeyword(textContent);
 };
 
 const getDetectedProtocolUrl = async (baseUrl) => {
@@ -126,19 +174,19 @@ const getPage = async (url) => {
 	try {
 		const { statusCode, headers, body } = await request(url);
 		const data = await body.text();
-		if (trace) {
+		if (TRACE) {
 			console.log('Response status', statusCode);
 			console.log('Response headers', headers);
 		}
 
-		if (debug) {
+		if (DEBUG) {
 			console.log('Data', data);
 		}
 
 		return data;
 	} catch(error) {
 		console.error(`Couldn't get page content for url ${url}`);
-		if (debug) {
+		if (DEBUG) {
 			console.error(error);
 		}
 		return null;
@@ -152,7 +200,7 @@ const getPages = async (urls) => {
 		const page = {
 			error: data === null,
 			url,
-			paywalled: findPaywall(data)
+			paywalled: await findPaywall(url)
 		};
 		pages[url] = page;
 	}
@@ -208,6 +256,57 @@ const getArchives = async (urls) => {
 	return archives;
 };
 
+const hasPaywallAttribute = (document) => {
+	for (const prop in document) {
+		console.log("Document has prop", prop);
+	}
+	for (const attributeName in PAYWALL_ATTRIBUTES) {
+		const attribute = PAYWALL_ATTRIBUTES[attributeName];
+		if (!attribute.contains) {
+			continue;
+		}
+
+		for (const value of attribute.contains) {
+			const lower = value.toLowerCase();
+			const selector = `[${attributeName}*="${value}"], [${attributeName}*="${lower}"]`;
+
+			if (document.querySelector(selector) !== null) {
+				return true;
+			}
+		}
+	}
+
+	return false;
+};
+
+const hasPaywallAttributePage = async (page) => {
+	for (const attributeName in PAYWALL_ATTRIBUTES) {
+		const attribute = PAYWALL_ATTRIBUTES[attributeName];
+		if (!attribute.contains) {
+			continue;
+		}
+
+		for (const value of attribute.contains) {
+			const lower = value.toLowerCase();
+			const selector = `[${attributeName}*="${value}"], [${attributeName}*="${lower}"]`;
+
+			const element = await page.$(selector);
+
+			if (DEBUG) {
+				console.log(await page.content());
+			}
+
+			if (element !== null) {
+				return true;
+			}
+		}
+	}
+
+	return false;
+};
+
+const hasPaywallKeyword = (data) => PAYWALL_KEYWORDS.some(kw => data.includes(kw) || data.toLowerCase().includes(kw.toLowerCase()));
+
 const isBotMessage = (message) => {
 	return message.author.id === CLIENT.user.id;
 };
@@ -230,12 +329,12 @@ CLIENT.once(Events.ClientReady, readyClient => {
 });
 
 CLIENT.on(Events.MessageCreate, async message => {
-	if (trace) {
+	if (TRACE) {
 		console.log('Received message create event');
 		logMessageProperties(message);
 	}
 
-	if (debug) {
+	if (DEBUG) {
 		console.log(`Message content: ${message}`);
 	}
 
@@ -246,7 +345,7 @@ CLIENT.on(Events.MessageCreate, async message => {
 	const urls = await extractUrls(message);
 
 	if (urls.length === 0) {
-		if (debug) {
+		if (DEBUG) {
 			console.log("No URLs found in message content");
 		}
 		message.reply(NO_URL_REPLY);
@@ -261,10 +360,14 @@ CLIENT.on(Events.MessageCreate, async message => {
 const processUrls = async (urls) => {
 	// We get page contents for urls, to see if they're paywalled
 	const pages = await getPages(urls);
+	const foundPages = Object.values(pages).filter(page => !page.error);
+	const paywalledPages = foundPages.filter(page => page.paywalled);
+	console.log(`Found ${paywalledPages.length} paywalled pages`);
 	// When we've confirmed paywall detection is working, add filter condition
 	// A la page => !page.error && page.paywalled
-	const archiveResults = await getArchives(pages.filter(page => !page.error));
-	const archives = archiveResults.filter(archive => archive.result);
+	const archiveResults = await getArchives(paywalledPages.map(page => page.url));
+	console.log(`Got archiveResults: ${JSON.stringify(archiveResults)}`);
+	const archives = Object.values(archiveResults).filter(archive => archive.result);
 
 	return [ pages, archives ];
 };
