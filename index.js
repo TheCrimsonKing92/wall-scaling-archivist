@@ -11,7 +11,6 @@ dotenv.config();
 const DEBUG = "true" === process.env.DEBUG;
 const TRACE = "true" === process.env.TRACE;
 
-const ARCHIVE_URL = "https://archive.is/";
 const CLIENT = new Client({
 	intents: [ Guilds, GuildMessages, MessageContent ]
 });

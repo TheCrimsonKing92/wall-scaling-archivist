@@ -53,10 +53,13 @@ const PAYWALL_KEYWORDS = [
         'continue reading', 'Continue with a free trial', "Register"
 ];
 
-const hasPaywallAttribute = (document) => {
-        for (const prop in document) {
-                console.log("Document has prop", prop);
-        }
+const hasPaywallAttribute = (document, debug = false) => {
+	if (debug) {
+	        for (const prop in document) {
+        	        console.log("Document has prop", prop);
+	        }
+	}
+
         for (const attributeName in PAYWALL_ATTRIBUTES) {
                 const attribute = PAYWALL_ATTRIBUTES[attributeName];
                 if (!attribute.contains) {
@@ -76,7 +79,7 @@ const hasPaywallAttribute = (document) => {
         return false;
 };
 
-const hasPaywallAttributePage = async (page) => {
+const hasPaywallAttributePage = async (page, debug = false) => {
         for (const attributeName in PAYWALL_ATTRIBUTES) {
                 const attribute = PAYWALL_ATTRIBUTES[attributeName];
                 if (!attribute.contains) {
@@ -89,7 +92,7 @@ const hasPaywallAttributePage = async (page) => {
 
                         const element = await page.$(selector);
 
-                        if (DEBUG) {
+                        if (debug) {
                                 console.log(await page.content());
                         }
 
@@ -104,25 +107,22 @@ const hasPaywallAttributePage = async (page) => {
 
 const hasPaywallKeyword = (data) => PAYWALL_KEYWORDS.some(kw => data.includes(kw) || data.toLowerCase().includes(kw.toLowerCase()));
 
-export const findPaywall = async (url) => {
-        console.log('Launching browser');
+export const findPaywall = async (url, debug = false) => {
         const browser = await puppeteer.launch();
-        console.log('Generating new page');
         const page = await browser.newPage();
-        console.log("Setting user agent on page");
         await page.setUserAgent(ASSUMED_USER_AGENT);
-        console.log(`Going to url ${url}`);
+	if (debug) {
+	        console.log(`Going to url ${url}`);
+	}
         await page.goto(url, { timeout: 120000, waitUntil: 'networkidle2' });
 
-        console.log('Scanning for paywall attribute');
-        if (await hasPaywallAttributePage(page)) {
+	// TODO: Use env variable to determine if we scrape statically or use puppeteer
+        if (await hasPaywallAttributePage(page, debug)) {
                 return true;
         }
 
         // Should likely switch to page.evaluate(() => document.body.textContent and go from there
-        console.log('Getting page text content');
         const textContent = await page.content();
 
-        console.log('Scanning for paywall keywords');
         return hasPaywallKeyword(textContent);
 };
